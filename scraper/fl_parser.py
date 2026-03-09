@@ -27,6 +27,7 @@ class FLProject:
     budget_raw: str
     url: str
     source: str = "fl.ru"
+    published_at: str = ""
 
 
 def fetch_fl_projects(page: int = 1) -> List[FLProject]:
@@ -87,6 +88,12 @@ def _parse_fl_card(card) -> Optional[FLProject]:
     digits = re.sub(r"[^\d]", "", budget_raw)
     budget = int(digits) if digits else 0
 
+    # Published at
+    time_el = card.select_one("time, [class*='date'], [class*='time'], [class*='ago'], [class*='created']")
+    published_at = ""
+    if time_el:
+        published_at = time_el.get_text(strip=True) or time_el.get("datetime", "")
+
     return FLProject(
         project_id=str(project_id),
         title=title,
@@ -94,4 +101,5 @@ def _parse_fl_card(card) -> Optional[FLProject]:
         budget=budget,
         budget_raw=budget_raw,
         url=url,
+        published_at=published_at,
     )

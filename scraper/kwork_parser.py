@@ -24,6 +24,8 @@ class KworkProject:
     budget_raw: str
     url: str
     category: str = ""
+    published_at: str = ""
+    source: str = "kwork.ru"
 
 
 async def fetch_projects(page_num: int = 1) -> List[KworkProject]:
@@ -110,6 +112,16 @@ async def _parse_card(card, page) -> Optional[KworkProject]:
     cat_el = await card.query_selector("[class*='category'], [class*='cat']")
     category = (await cat_el.inner_text()).strip() if cat_el else ""
 
+    # --- Published at ---
+    time_el = await card.query_selector(
+        "time, [class*='date'], [class*='time'], [class*='ago'], [class*='created'], [class*='publish']"
+    )
+    published_at = ""
+    if time_el:
+        published_at = (await time_el.inner_text()).strip()
+        if not published_at:
+            published_at = await time_el.get_attribute("datetime") or ""
+
     return KworkProject(
         project_id=str(project_id),
         title=title,
@@ -118,6 +130,7 @@ async def _parse_card(card, page) -> Optional[KworkProject]:
         budget_raw=budget_raw,
         url=url,
         category=category,
+        published_at=published_at,
     )
 
 
