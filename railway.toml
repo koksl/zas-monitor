@@ -1,9 +1,6 @@
 [build]
 builder = "nixpacks"
 
-[build.nixpacksPlan.phases.setup]
-nixPkgs = ["chromium", "chromium-driver"]
-
 [deploy]
-startCommand = "playwright install chromium && python bot/main.py"
+startCommand = "playwright install --with-deps chromium && python bot/main.py"
 restartPolicyType = "always"
