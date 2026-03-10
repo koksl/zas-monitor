@@ -78,6 +78,11 @@ async def cmd_check(message: Message):
 @dp.message(Command("stats"))
 async def cmd_stats(message: Message):
     if message.from_user.id != config.MY_TELEGRAM_ID:
+        await message.answer(
+            f"⛔ Нет доступа. Твой ID: {message.from_user.id}\n"
+            f"Ожидается: {config.MY_TELEGRAM_ID}\n\n"
+            f"Исправь MY_TELEGRAM_ID в Railway Variables."
+        )
         return
     s = get_stats()
     await message.answer(
