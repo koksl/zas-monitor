@@ -114,7 +114,7 @@ async def cb_accept(callback: CallbackQuery):
     update_draft_status(draft_id, "pending")
 
     await callback.message.answer(
-        f"✅ *Принято\\!* Готовый отклик:\n\n"
+        f"✅ *Принято!* Готовый отклик:\n\n"
         f"`{_esc(draft_text)}`\n\n"
         f"_Нажми на текст — он скопируется_",
         parse_mode="Markdown",
@@ -171,7 +171,7 @@ async def cb_regen(callback: CallbackQuery):
     # Заменяем текст в том же сообщении
     try:
         await callback.message.edit_text(
-            f"✅ *Принято\\!* Готовый отклик:\n\n"
+            f"✅ *Принято!* Готовый отклик:\n\n"
             f"`{_esc(new_draft_text)}`\n\n"
             f"_Нажми на текст — он скопируется_",
             parse_mode="Markdown",
