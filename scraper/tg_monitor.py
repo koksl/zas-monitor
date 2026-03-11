@@ -104,7 +104,8 @@ class TelegramChatMonitor:
                     self.api_id,
                     self.api_hash,
                 )
-                await self.client.start()
+                tg_phone = os.environ.get("TG_PHONE", "")
+                await self.client.start(phone=tg_phone if tg_phone else None)
                 logger.info("Telegram client started")
 
                 self.client.add_event_handler(
