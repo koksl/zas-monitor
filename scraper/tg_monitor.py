@@ -7,6 +7,7 @@
 import asyncio
 import logging
 import os
+import sqlite3
 from datetime import datetime, timedelta
 
 from telethon import TelegramClient, events
@@ -16,6 +17,31 @@ import config
 from scraper.filter import is_relevant
 
 logger = logging.getLogger(__name__)
+
+# ─── PERSISTENCE: кэш обработанных ID ────────────────────────────────────────
+
+_DB_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "tg_seen.db")
+
+def _init_seen_db():
+    os.makedirs(os.path.dirname(_DB_PATH), exist_ok=True)
+    con = sqlite3.connect(_DB_PATH)
+    con.execute("CREATE TABLE IF NOT EXISTS seen_messages (msg_id INTEGER PRIMARY KEY, ts INTEGER DEFAULT (strftime('%s','now')))")
+    con.execute("DELETE FROM seen_messages WHERE ts < strftime('%s','now') - 86400 * 7")  # TTL 7 дней
+    con.commit()
+    con.close()
+
+def _is_msg_seen(msg_id: int) -> bool:
+    con = sqlite3.connect(_DB_PATH)
+    row = con.execute("SELECT 1 FROM seen_messages WHERE msg_id=?", (msg_id,)).fetchone()
+    con.close()
+    return row is not None
+
+def _mark_msg_seen(msg_id: int):
+    con = sqlite3.connect(_DB_PATH)
+    con.execute("INSERT OR IGNORE INTO seen_messages(msg_id) VALUES(?)", (msg_id,))
+    con.commit()
+    con.close()
+
 
 # ─── ЧАТЫ ДЛЯ МОНИТОРИНГА ───────────────────────────────────────────────────
 # Публичные чаты предпринимателей и IT — добавляй/убирай по необходимости
@@ -66,25 +92,34 @@ class TelegramChatMonitor:
         self.notify_callback = notify_callback
         self.client = None
         self.session_path = "./data/tg_session"
+        _init_seen_db()
 
     async def start(self):
-        """Запустить мониторинг."""
-        self.client = TelegramClient(
-            self.session_path,
-            self.api_id,
-            self.api_hash,
-        )
-        await self.client.start()
-        logger.info("Telegram client started")
+        """Запустить мониторинг с автоматическим reconnect."""
+        retry_delay = 5
+        while True:
+            try:
+                self.client = TelegramClient(
+                    self.session_path,
+                    self.api_id,
+                    self.api_hash,
+                )
+                await self.client.start()
+                logger.info("Telegram client started")
 
-        # Регистрируем обработчик новых сообщений
-        self.client.add_event_handler(
-            self._handle_message,
-            events.NewMessage(chats=CHATS_TO_MONITOR),
-        )
+                self.client.add_event_handler(
+                    self._handle_message,
+                    events.NewMessage(chats=CHATS_TO_MONITOR),
+                )
 
-        logger.info(f"Monitoring {len(CHATS_TO_MONITOR)} Telegram chats")
-        await self.client.run_until_disconnected()
+                logger.info(f"Monitoring {len(CHATS_TO_MONITOR)} Telegram chats")
+                retry_delay = 5  # сброс после успешного подключения
+                await self.client.run_until_disconnected()
+
+            except Exception as e:
+                logger.warning(f"TG client disconnected: {e}. Reconnecting in {retry_delay}s...")
+                await asyncio.sleep(retry_delay)
+                retry_delay = min(retry_delay * 2, 300)  # экспоненциальный backoff до 5 мин
 
     async def _handle_message(self, event: events.NewMessage.Event):
         """Обработать новое сообщение из чата."""
@@ -93,10 +128,10 @@ class TelegramChatMonitor:
             return
         if len(msg.text) < MIN_MESSAGE_LENGTH:
             return
-        if msg.id in _processed_message_ids:
+        if _is_msg_seen(msg.id):
             return
 
-        _processed_message_ids.add(msg.id)
+        _mark_msg_seen(msg.id)
 
         # Проверяем релевантность через тот же фильтр что и для площадок
         fake_project = _FakeProject(

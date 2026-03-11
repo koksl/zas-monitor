@@ -23,6 +23,7 @@ from db.storage import (
 )
 from scraper.kwork_parser import fetch_projects, KworkProject
 from scraper.filter import filter_projects
+from scraper import kwork_api
 from ai.drafter import generate_draft
 from bot.notifier import send_project_notification, _build_draft_keyboard, _esc
 
@@ -72,6 +73,32 @@ async def cmd_check(message: Message):
     except Exception as e:
         await message.answer(f"❌ Ошибка при проверке:\n`{e}`", parse_mode="Markdown")
         logger.exception("check_all_platforms failed")
+
+
+@dp.message(Command("debug"))
+async def cmd_debug(message: Message):
+    if message.from_user.id != config.MY_TELEGRAM_ID:
+        return
+    await message.answer("🔍 Диагностика парсера...")
+    import requests
+    try:
+        r = requests.get(
+            f"{config.KWORK_PROJECTS_URL}?c=all&page=1",
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=15,
+        )
+        html_preview = r.text[:500].replace("<", "&lt;")
+        # Считаем вхождения want-card
+        card_count = r.text.count("want-card")
+        await message.answer(
+            f"HTTP: {r.status_code}\n"
+            f"Размер HTML: {len(r.text)} символов\n"
+            f"Вхождений 'want-card': {card_count}\n\n"
+            f"Первые 500 символов:\n<pre>{html_preview}</pre>",
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        await message.answer(f"❌ Ошибка: {e}")
 
 
 @dp.message(Command("stats"))
@@ -135,6 +162,28 @@ async def cb_accept(callback: CallbackQuery):
         reply_markup=_build_draft_keyboard(draft_id, row["url"] or ""),
         disable_web_page_preview=True,
     )
+
+
+# ─── CALLBACK: ОТОЗВАТЬ АВТО-ОТКЛИК ─────────────────────────────────────────
+
+@dp.callback_query(F.data.startswith("revoke:"))
+async def cb_revoke(callback: CallbackQuery):
+    project_id = callback.data.split(":", 1)[1]
+    await callback.answer("Отзываю отклик...")
+    success = await asyncio.get_event_loop().run_in_executor(
+        None, kwork_api.revoke_response, project_id
+    )
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+    if success:
+        await callback.message.answer(f"✅ Отклик на заказ {project_id} отозван.")
+    else:
+        await callback.message.answer(
+            f"⚠️ Не удалось отозвать отклик. Возможно, прошло слишком много времени.\n"
+            f"Отзови вручную: https://kwork.ru/projects/{project_id}"
+        )
 
 
 # ─── CALLBACK: ОТКАЗАТЬСЯ ────────────────────────────────────────────────────
@@ -220,22 +269,111 @@ async def _process_projects(bot: Bot, projects: list, new_count: int) -> int:
             source=getattr(project, "source", "kwork.ru"),
         )
         logger.info(f"New project: {project.title[:60]}")
-        await send_project_notification(bot, project)
+
+        source = getattr(project, "source", "kwork.ru")
+
+        # ── Авто-отклик на Kwork ────────────────────────────────────────────
+        if source == "kwork.ru" and kwork_api.is_available():
+            asyncio.create_task(_auto_respond(bot, project))
+        else:
+            await send_project_notification(bot, project)
+
         new_count += 1
         await asyncio.sleep(1)
     return new_count
 
 
+async def _auto_respond(bot: Bot, project) -> None:
+    """Генерировать отклик и авто-отправить на Kwork, уведомить в TG."""
+    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+    try:
+        draft_text = generate_draft(project)
+        draft_id = save_draft(project.project_id, draft_text)
+
+        success = await asyncio.get_event_loop().run_in_executor(
+            None, kwork_api.submit_response, project.project_id, draft_text
+        )
+
+        if success:
+            update_draft_status(draft_id, "sent")
+            kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="❌ Отозвать отклик", callback_data=f"revoke:{project.project_id}")],
+                [InlineKeyboardButton(text="🔗 Смотреть заказ", url=project.url or f"https://kwork.ru/projects/{project.project_id}")],
+            ])
+            await bot.send_message(
+                config.MY_TELEGRAM_ID,
+                f"🤖 *Авто-отклик отправлен!*\n\n"
+                f"📋 {project.title[:80]}\n"
+                f"💰 {project.budget_raw or '—'}\n\n"
+                f"_Отклик:_\n`{_esc(draft_text[:300])}`\n\n"
+                f"_Нажми «Отозвать» если не нужен (10 мин)_",
+                parse_mode="Markdown",
+                reply_markup=kb,
+                disable_web_page_preview=True,
+            )
+        else:
+            # Авто-отклик не сработал — отправляем обычное уведомление
+            update_draft_status(draft_id, "failed")
+            logger.warning(f"Auto-respond failed for {project.project_id}, sending manual notification")
+            await send_project_notification(bot, project)
+    except Exception as e:
+        logger.error(f"_auto_respond error: {e}")
+        await send_project_notification(bot, project)
+
+
 async def check_all_platforms(bot: Bot) -> int:
-    logger.info("Checking Kwork...")
     new_count = 0
 
+    # ── Kwork ──────────────────────────────────────────────────────────────
+    logger.info("Checking Kwork...")
     for page_num in range(1, 3):
         projects = await fetch_projects(page_num=page_num)
         if not projects:
             break
         new_count = await _process_projects(bot, projects, new_count)
         await asyncio.sleep(config.REQUEST_DELAY_SECONDS)
+
+    # ── Habr Freelance ─────────────────────────────────────────────────────
+    logger.info("Checking Habr Freelance...")
+    try:
+        from scraper.habr_parser import fetch_habr_projects
+        loop = asyncio.get_event_loop()
+        for page_num in range(1, 3):
+            habr_projects = await loop.run_in_executor(None, fetch_habr_projects, page_num)
+            if not habr_projects:
+                break
+            new_count = await _process_projects(bot, habr_projects, new_count)
+            await asyncio.sleep(config.REQUEST_DELAY_SECONDS)
+    except Exception as e:
+        logger.error(f"Habr check error: {e}")
+
+    # ── Freelance.ru ───────────────────────────────────────────────────────
+    logger.info("Checking Freelance.ru...")
+    try:
+        from scraper.freelance_parser import fetch_freelance_projects
+        loop = asyncio.get_event_loop()
+        for page_num in range(1, 3):
+            fr_projects = await loop.run_in_executor(None, fetch_freelance_projects, page_num)
+            if not fr_projects:
+                break
+            new_count = await _process_projects(bot, fr_projects, new_count)
+            await asyncio.sleep(config.REQUEST_DELAY_SECONDS)
+    except Exception as e:
+        logger.error(f"Freelance.ru check error: {e}")
+
+    # ── Weblancer ──────────────────────────────────────────────────────────
+    logger.info("Checking Weblancer...")
+    try:
+        from scraper.weblancer_parser import fetch_weblancer_projects
+        loop = asyncio.get_event_loop()
+        for page_num in range(1, 3):
+            wl_projects = await loop.run_in_executor(None, fetch_weblancer_projects, page_num)
+            if not wl_projects:
+                break
+            new_count = await _process_projects(bot, wl_projects, new_count)
+            await asyncio.sleep(config.REQUEST_DELAY_SECONDS)
+    except Exception as e:
+        logger.error(f"Weblancer check error: {e}")
 
     logger.info(f"Check complete. New: {new_count}")
     return new_count
