@@ -22,7 +22,6 @@ from db.storage import (
     update_draft_status, get_stats, mark_seen, is_seen, save_draft,
 )
 from scraper.kwork_parser import fetch_projects, KworkProject
-from scraper.fl_parser import fetch_fl_projects
 from scraper.filter import filter_projects
 from ai.drafter import generate_draft
 from bot.notifier import send_project_notification, _build_draft_keyboard, _esc
@@ -228,25 +227,14 @@ async def _process_projects(bot: Bot, projects: list, new_count: int) -> int:
 
 
 async def check_all_platforms(bot: Bot) -> int:
-    logger.info("Starting multi-platform check...")
+    logger.info("Checking Kwork...")
     new_count = 0
 
-    # ── Kwork ──────────────────────────────────────────────────────────────
-    logger.info("Checking Kwork...")
     for page_num in range(1, 3):
         projects = await fetch_projects(page_num=page_num)
         if not projects:
             break
         new_count = await _process_projects(bot, projects, new_count)
-        await asyncio.sleep(config.REQUEST_DELAY_SECONDS)
-
-    # ── FL.ru ──────────────────────────────────────────────────────────────
-    logger.info("Checking FL.ru...")
-    for page_num in range(1, 3):
-        fl_projects = fetch_fl_projects(page=page_num)
-        if not fl_projects:
-            break
-        new_count = await _process_projects(bot, fl_projects, new_count)
         await asyncio.sleep(config.REQUEST_DELAY_SECONDS)
 
     logger.info(f"Check complete. New: {new_count}")
