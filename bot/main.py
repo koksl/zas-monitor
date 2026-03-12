@@ -333,19 +333,7 @@ async def check_all_platforms(bot: Bot) -> int:
         new_count = await _process_projects(bot, projects, new_count)
         await asyncio.sleep(config.REQUEST_DELAY_SECONDS)
 
-    # ── Habr Freelance ─────────────────────────────────────────────────────
-    logger.info("Checking Habr Freelance...")
-    try:
-        from scraper.habr_parser import fetch_habr_projects
-        loop = asyncio.get_event_loop()
-        for page_num in range(1, 3):
-            habr_projects = await loop.run_in_executor(None, fetch_habr_projects, page_num)
-            if not habr_projects:
-                break
-            new_count = await _process_projects(bot, habr_projects, new_count)
-            await asyncio.sleep(config.REQUEST_DELAY_SECONDS)
-    except Exception as e:
-        logger.error(f"Habr check error: {e}")
+    # Habr Freelance отключён — площадка вернула 410 Gone (URL устарел)
 
     # ── Freelance.ru ───────────────────────────────────────────────────────
     logger.info("Checking Freelance.ru...")
