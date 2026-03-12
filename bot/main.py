@@ -75,6 +75,58 @@ async def cmd_check(message: Message):
         logger.exception("check_all_platforms failed")
 
 
+@dp.message(Command("debug_tg"))
+async def cmd_debug_tg(message: Message):
+    if message.from_user.id != config.MY_TELEGRAM_ID:
+        return
+    from scraper.tg_monitor import CHATS_TO_MONITOR
+    tg_api_id = int(os.getenv("TG_API_ID") or "0")
+    tg_api_hash = os.getenv("TG_API_HASH", "")
+    if not tg_api_id:
+        await message.answer("❌ TG_API_ID не задан в переменных")
+        return
+    await message.answer(f"🔍 Проверяю {len(CHATS_TO_MONITOR)} чатов...\nЭто займёт ~30 сек")
+    from telethon import TelegramClient
+    from telethon.sessions import StringSession
+    session_str = os.getenv("TG_SESSION_STRING", "")
+    session = StringSession(session_str) if session_str else "./data/tg_session"
+    ok, fail = [], []
+    async with TelegramClient(session, tg_api_id, tg_api_hash) as client:
+        for chat_url in CHATS_TO_MONITOR:
+            try:
+                entity = await client.get_entity(chat_url)
+                title = getattr(entity, "title", chat_url)
+                members = getattr(entity, "participants_count", "?")
+                ok.append(f"✅ {title} ({members} уч.)")
+            except Exception as e:
+                fail.append(f"❌ {chat_url.split('/')[-1]}: {str(e)[:40]}")
+    lines = ["*Доступные чаты:*"] + ok + ["", "*Недоступные:*"] + fail
+    await message.answer("\n".join(lines), parse_mode="Markdown")
+
+
+@dp.message(Command("scan_tg"))
+async def cmd_scan_tg(message: Message):
+    """Сканировать последние 24 часа во всех чатах."""
+    if message.from_user.id != config.MY_TELEGRAM_ID:
+        return
+    await message.answer("🔍 Сканирую историю чатов за 24 часа...")
+    tg_api_id = int(os.getenv("TG_API_ID") or "0")
+    tg_api_hash = os.getenv("TG_API_HASH", "")
+    if not tg_api_id:
+        await message.answer("❌ TG_API_ID не задан")
+        return
+    from scraper.tg_monitor import TelegramChatMonitor
+    monitor = TelegramChatMonitor(tg_api_id, tg_api_hash, lambda p: send_project_notification(bot, p))
+    from telethon.sessions import StringSession
+    session_str = os.getenv("TG_SESSION_STRING", "")
+    session = StringSession(session_str) if session_str else "./data/tg_session"
+    from telethon import TelegramClient
+    async with TelegramClient(session, tg_api_id, tg_api_hash) as client:
+        monitor.client = client
+        found = await monitor.scan_recent(hours=24, limit=200)
+    await message.answer(f"✅ Скан завершён. Найдено релевантных: *{found}*", parse_mode="Markdown")
+
+
 @dp.message(Command("debug"))
 async def cmd_debug(message: Message):
     if message.from_user.id != config.MY_TELEGRAM_ID:
