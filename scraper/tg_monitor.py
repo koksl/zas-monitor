@@ -11,6 +11,7 @@ import sqlite3
 from datetime import datetime, timedelta
 
 from telethon import TelegramClient, events
+from telethon.sessions import StringSession
 from telethon.tl.types import Message
 
 import config
@@ -91,7 +92,8 @@ class TelegramChatMonitor:
         self.api_hash = api_hash
         self.notify_callback = notify_callback
         self.client = None
-        self.session_path = "./data/tg_session"
+        session_string = os.getenv("TG_SESSION_STRING", "")
+        self.session = StringSession(session_string) if session_string else "./data/tg_session"
         _init_seen_db()
 
     async def start(self):
@@ -100,7 +102,7 @@ class TelegramChatMonitor:
         while True:
             try:
                 self.client = TelegramClient(
-                    self.session_path,
+                    self.session,
                     self.api_id,
                     self.api_hash,
                 )
