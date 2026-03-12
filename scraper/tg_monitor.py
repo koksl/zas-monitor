@@ -48,31 +48,36 @@ def _mark_msg_seen(msg_id: int):
 # Публичные чаты предпринимателей и IT — добавляй/убирай по необходимости
 
 CHATS_TO_MONITOR = [
-    # ── Предприниматели ──────────────────────────────────────────────────────
-    "https://t.me/business_ru",          # Бизнес RU
-    "https://t.me/biznes_ru",
-    "https://t.me/msp_russia",           # МСП Россия
-    "https://t.me/predprinimatel_chat",
-    "https://t.me/opora_russia_chat",
-    "https://t.me/malyi_biznes_chat",
+    # ── Фриланс-биржи (самые целевые) ───────────────────────────────────────
+    "https://t.me/freelance_ru",         # Фриланс Россия
+    "https://t.me/fl_ru_official",       # FL.ru официальный
+    "https://t.me/weblancer_chat",       # Weblancer чат
+    "https://t.me/kwork_news",           # Kwork новости
+    "https://t.me/freelancehunt",        # Freelancehunt
 
     # ── IT / разработка ──────────────────────────────────────────────────────
-    "https://t.me/freelance_it_ru",
-    "https://t.me/it_freelance_ru",
-    "https://t.me/python_jobs",
-    "https://t.me/tg_dev",              # Telegram разработка
+    "https://t.me/python_jobs",          # Python вакансии
+    "https://t.me/devjobs_ru",           # Dev jobs RU
+    "https://t.me/tproger_ru",           # Tproger
+    "https://t.me/aiogram_ru",           # aiogram (сюда пишут заказчики!)
+    "https://t.me/botfather_chat",       # Bot developers
 
-    # ── ИИ / нейросети ───────────────────────────────────────────────────────
-    "https://t.me/ai_ru_chat",
-    "https://t.me/gpt_chat_ru",
-    "https://t.me/neural_networks_ru",
+    # ── ИИ / нейросети (растущие) ────────────────────────────────────────────
+    "https://t.me/ai_machinelearning_ru",  # AI/ML Russia
     "https://t.me/chatgpt_russia",
+    "https://t.me/neural_ru",
+    "https://t.me/openai_ru",
 
-    # ── Маркетинг / автоматизация ────────────────────────────────────────────
-    "https://t.me/marketing_ru_chat",
-    "https://t.me/smm_ru_chat",
-    "https://t.me/crm_chat_ru",
-    "https://t.me/automation_business",
+    # ── Бизнес / предприниматели ─────────────────────────────────────────────
+    "https://t.me/vc_ru",                # VC.ru (огромный)
+    "https://t.me/business_ru",
+    "https://t.me/retail_ru_chat",
+    "https://t.me/marketingru",
+
+    # ── Автоматизация / no-code ───────────────────────────────────────────────
+    "https://t.me/n8n_ru",
+    "https://t.me/make_community_ru",
+    "https://t.me/zapier_ru",
 ]
 
 # Минимальная длина сообщения для обработки (фильтр спама)
@@ -117,12 +122,23 @@ class TelegramChatMonitor:
 
                 logger.info(f"Monitoring {len(CHATS_TO_MONITOR)} Telegram chats")
                 retry_delay = 5  # сброс после успешного подключения
+
+                # Авто-скан истории при каждом старте (находим пропущенное за 48ч)
+                asyncio.create_task(self._startup_scan())
+
                 await self.client.run_until_disconnected()
 
             except Exception as e:
                 logger.warning(f"TG client disconnected: {e}. Reconnecting in {retry_delay}s...")
                 await asyncio.sleep(retry_delay)
                 retry_delay = min(retry_delay * 2, 300)  # экспоненциальный backoff до 5 мин
+
+    async def _startup_scan(self):
+        """Сканировать историю чатов за 48ч после старта — не пропустить пропущенное."""
+        await asyncio.sleep(5)  # дать клиенту стабилизироваться
+        logger.info("Running startup historical scan (48h)...")
+        found = await self.scan_recent(hours=48, limit=500)
+        logger.info(f"Startup scan done: {found} relevant messages")
 
     async def _handle_message(self, event: events.NewMessage.Event):
         """Обработать новое сообщение из чата."""

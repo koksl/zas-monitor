@@ -463,6 +463,21 @@ async def main():
             await send_project_notification(bot, tg_project)
 
         tg_monitor = TelegramChatMonitor(tg_api_id, tg_api_hash, tg_notify)
+
+        # Периодический ресканирование последних 2ч — страховка от пропусков
+        async def _periodic_tg_scan():
+            if tg_monitor.client and tg_monitor.client.is_connected():
+                logger.info("Periodic TG history scan (2h)...")
+                found = await tg_monitor.scan_recent(hours=2, limit=200)
+                logger.info(f"Periodic TG scan done: {found} relevant messages")
+
+        scheduler.add_job(
+            _periodic_tg_scan,
+            trigger="interval",
+            minutes=30,
+            id="tg_history_scan",
+        )
+
         await asyncio.gather(tg_monitor.start(), dp.start_polling(bot))
     else:
         logger.info("TG monitoring disabled")
