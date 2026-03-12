@@ -1,6 +1,6 @@
 """
-Парсер kwork.ru/projects — requests + BeautifulSoup.
-Без Playwright: данные берём из SSR-JSON в script-тегах или из HTML напрямую.
+Парсер kwork.ru/projects — Playwright (основной) + requests fallback.
+Kwork рендерит карточки через Vue.js, поэтому нужен браузер.
 """
 import hashlib
 import json
@@ -15,6 +15,13 @@ from bs4 import BeautifulSoup
 import config
 
 logger = logging.getLogger(__name__)
+
+_playwright_available = False
+try:
+    from playwright.async_api import async_playwright
+    _playwright_available = True
+except ImportError:
+    pass
 
 HEADERS = {
     "User-Agent": (
@@ -46,7 +53,17 @@ class KworkProject:
 
 
 async def fetch_projects(page_num: int = 1) -> List[KworkProject]:
-    """Загрузить страницу проектов Kwork (без браузера)."""
+    """Загрузить страницу проектов Kwork."""
+    if _playwright_available:
+        try:
+            projects = await _fetch_with_playwright(page_num)
+            if projects:
+                logger.info(f"Kwork page {page_num}: {len(projects)} projects (Playwright)")
+                return projects
+        except Exception as e:
+            logger.warning(f"Playwright failed: {e}, falling back to requests")
+
+    # Fallback: requests
     url = f"{config.KWORK_PROJECTS_URL}?c=all&page={page_num}"
     try:
         r = _session.get(url, timeout=config.REQUEST_TIMEOUT)
@@ -65,11 +82,59 @@ async def fetch_projects(page_num: int = 1) -> List[KworkProject]:
     return projects
 
 
+async def _fetch_with_playwright(page_num: int) -> List[KworkProject]:
+    """Загрузить проекты через Playwright (поддерживает JS)."""
+    url = f"{config.KWORK_PROJECTS_URL}?c=all&page={page_num}"
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
+        )
+        page = await browser.new_page()
+        await page.goto(url, wait_until="networkidle", timeout=30000)
+
+        cards = await page.query_selector_all(".want-card")
+        projects = []
+        for card in cards:
+            try:
+                link = await card.query_selector("a[href*='project']")
+                if not link:
+                    link = await card.query_selector(".want-card__header-title a, h2 a, h3 a")
+                if not link:
+                    continue
+                title = (await link.inner_text()).strip()
+                href = await link.get_attribute("href") or ""
+                url_full = f"https://kwork.ru{href}" if href.startswith("/") else href
+
+                m = re.search(r"/projects/(\d+)", url_full)
+                project_id = m.group(1) if m else "kw_" + hashlib.md5(title.encode()).hexdigest()[:10]
+
+                desc_el = await card.query_selector("[class*='desc'], [class*='description']")
+                description = (await desc_el.inner_text()).strip() if desc_el else ""
+
+                price_el = await card.query_selector("[class*='price'], [class*='budget']")
+                budget_raw = (await price_el.inner_text()).strip() if price_el else "не указан"
+                budget = _parse_budget(budget_raw)
+
+                projects.append(KworkProject(
+                    project_id=project_id,
+                    title=title,
+                    description=description,
+                    budget=budget,
+                    budget_raw=budget_raw,
+                    url=url_full,
+                ))
+            except Exception as e:
+                logger.debug(f"Card parse error: {e}")
+
+        await browser.close()
+        return projects
+
+
 # ─── JSON-парсинг (SSR / window.__INITIAL_STATE__) ───────────────────────────
 
 def _try_parse_json(html: str) -> List[KworkProject]:
     """Ищем JSON-данные проектов в script-тегах страницы."""
-    # Kwork прячет данные в window.__INITIAL_STATE__ или window.KWORK_DATA
     for pattern in [
         r"window\.__INITIAL_STATE__\s*=\s*(\{.+?\});\s*</script>",
         r"window\.KWORK_DATA\s*=\s*(\{.+?\});\s*</script>",
@@ -87,13 +152,11 @@ def _try_parse_json(html: str) -> List[KworkProject]:
         except (json.JSONDecodeError, Exception):
             continue
 
-    # Ищем все script-теги с большим JSON
     soup = BeautifulSoup(html, "html.parser")
     for script in soup.find_all("script"):
         text = script.string or ""
         if len(text) < 200 or "title" not in text.lower():
             continue
-        # Ищем массивы объектов с полем title
         m = re.search(r"(\[{.+?\"title\".+?}\])", text, re.DOTALL)
         if m:
             try:
@@ -108,20 +171,15 @@ def _try_parse_json(html: str) -> List[KworkProject]:
 
 
 def _extract_from_json(data) -> List[KworkProject]:
-    """Извлекаем проекты из произвольной JSON-структуры."""
     projects = []
-
-    # Если это список объектов
     items = data if isinstance(data, list) else []
 
-    # Если это словарь, ищем списки внутри
     if isinstance(data, dict):
         for key in ("wants", "projects", "data", "items", "list"):
             if key in data and isinstance(data[key], list):
                 items = data[key]
                 break
         if not items:
-            # Рекурсивно ищем вложенные списки
             for v in data.values():
                 if isinstance(v, list) and v and isinstance(v[0], dict) and "title" in v[0]:
                     items = v
@@ -165,7 +223,6 @@ def _parse_html(html: str) -> List[KworkProject]:
     soup = BeautifulSoup(html, "html.parser")
     projects = []
 
-    # Kwork: карточки проектов имеют классы want-card, wants-card, b-post и пр.
     cards = (
         soup.select("div.want-card")
         or soup.select("[class*='want-card']")
@@ -186,7 +243,6 @@ def _parse_html(html: str) -> List[KworkProject]:
 
 
 def _parse_card(card) -> Optional[KworkProject]:
-    # Title + URL
     title_el = card.select_one(
         ".want-card__header-title a, .wants-card__header-title a, "
         "h2 a, h3 a, [class*='title'] a, [class*='name'] a"
@@ -200,31 +256,25 @@ def _parse_card(card) -> Optional[KworkProject]:
     href = title_el.get("href", "")
     url = f"https://kwork.ru{href}" if href.startswith("/") else href or "https://kwork.ru/projects"
 
-    # Project ID
     project_id = ""
     m = re.search(r"/projects/(\d+)", url)
     if m:
         project_id = m.group(1)
     if not project_id:
-        # Try data attribute on card
         project_id = card.get("data-id", "") or card.get("id", "").replace("project-", "")
     if not project_id:
         project_id = "kw_" + hashlib.md5(title.encode()).hexdigest()[:10]
 
-    # Description
     desc_el = card.select_one("[class*='desc'], [class*='description'], p")
     description = desc_el.get_text(strip=True) if desc_el else ""
 
-    # Budget
     budget_el = card.select_one("[class*='price'], [class*='budget'], [class*='cost']")
     budget_raw = budget_el.get_text(strip=True) if budget_el else "не указан"
     budget = _parse_budget(budget_raw)
 
-    # Category
     cat_el = card.select_one("[class*='category'], [class*='cat']")
     category = cat_el.get_text(strip=True) if cat_el else ""
 
-    # Published at
     time_el = card.select_one(
         "time, [class*='date'], [class*='time'], [class*='ago'], [class*='created'], [class*='publish']"
     )
@@ -243,8 +293,6 @@ def _parse_card(card) -> Optional[KworkProject]:
         published_at=published_at,
     )
 
-
-# ─── Вспомогательные ─────────────────────────────────────────────────────────
 
 def _parse_budget(text: str) -> int:
     digits = re.sub(r"[^\d]", "", str(text))
